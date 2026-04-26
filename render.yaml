@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: school-agent
+    env: python
+    buildCommand: pip install -r requirements.txt && playwright install chromium
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MISTRAL_API_KEY
+        sync: false
+      - key: MISTRAL_BACKUP_KEYS
+        sync: false
+      - key: SCHOOL_WEBHOOK_URL
+        sync: false
+      - key: DATABASE_URL
+        value: sqlite:///./school_agent.db
+      - key: COURSE_FILES_DIR
+        value: ./course_files
+      - key: ZOOM_ACCOUNT_ID
+        sync: false
+      - key: ZOOM_CLIENT_ID
+        sync: false
+      - key: ZOOM_CLIENT_SECRET
+        sync: false
+      - key: ADMIN_SECRET
+        sync: false
