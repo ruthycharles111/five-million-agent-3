@@ -28,6 +28,9 @@ async def lifespan(app: FastAPI):
         agent.close()
 
 app = FastAPI(title="School Autonomous Agent API", lifespan=lifespan)
+@app.get("/health")
+def health():
+    return {"status":"ok"}
 
 class ChatMessage(BaseModel):
     role: str
