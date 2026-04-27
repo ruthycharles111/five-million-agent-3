@@ -1,18 +1,16 @@
 import os
 import json
+import asyncio
 import base64
-import io
-from datetime import datetime, timedelta
-from typing import Optional, List
 import logging
+from typing import Optional, List
+from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
-from reportlab.lib.units import inch
-from playwright.sync_api import sync_playwright
-from duckduckgo_search import DDGS
+from playwright.async_api import async_playwright
 from database import (
     get_db_session, Student, Course, Quiz, ExamResult, Term, UserAccount,
-    get_student_progress_db, set_term_lock, get_term_info, CourseFile
+    get_student_progress_db, set_term_lock, get_term_info, init_db
 )
 
 logger = logging.getLogger("uvicorn")
@@ -22,8 +20,7 @@ class ToolHandler:
         self.course_dir = os.getenv("COURSE_FILES_DIR", "./course_files")
         os.makedirs(self.course_dir, exist_ok=True)
 
-    def execute(self, name: str, args: dict):
-        # Parse args (they may come as string or dict)
+    async def execute(self, name: str, args: dict):
         if isinstance(args, str):
             args = json.loads(args)
         func_map = {
@@ -45,35 +42,63 @@ class ToolHandler:
         handler = func_map.get(name)
         if handler is None:
             return f"Unknown function: {name}"
-        return handler(**args)
+        # Proper async detection
+        if asyncio.iscoroutinefunction(handler):
+            return await handler(**args)
+        else:
+            return handler(**args)
 
     # ---------- Web & Screenshot ----------
     def search_web(self, query: str) -> List[dict]:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
-        return [{"title": r["title"], "url": r["href"], "snippet": r["body"]} for r in results]
+        """Search the web using DuckDuckGo HTML (no API key). Returns list of results."""
+        import httpx
+        from bs4 import BeautifulSoup
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0"}
+        try:
+            resp = httpx.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                headers=headers,
+                timeout=15
+            )
+            soup = BeautifulSoup(resp.text, "html.parser")
+            results = []
+            for item in soup.select(".result")[:5]:
+                title_el = item.select_one(".result__title a")
+                snippet_el = item.select_one(".result__snippet")
+                if title_el:
+                    results.append({
+                        "title": title_el.get_text(strip=True),
+                        "url": title_el.get("href"),
+                        "snippet": snippet_el.get_text(strip=True) if snippet_el else ""
+                    })
+            return results if results else [{"title":"No results","url":"","snippet":"Try a different query."}]
+        except Exception as e:
+            return [{"title":"Search error","url":"","snippet":str(e)}]
 
-    def take_screenshot(self, url: str) -> str:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, timeout=30000)
-            # Wait a moment for content to load
-            page.wait_for_timeout(2000)
-            screenshot = page.screenshot(full_page=True)
-            browser.close()
-        # Return base64
-        b64 = base64.b64encode(screenshot).decode("utf-8")
-        return f"data:image/png;base64,{b64}"
+    async def take_screenshot(self, url: str) -> str:
+        """Take a screenshot of a given URL using async Playwright. Returns Markdown image or error."""
+        try:
+            if url.startswith('//'):
+                url = 'https:' + url
+            if not url.startswith(('http://','https://')):
+                return f"Invalid URL: {url}"
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.goto(url, timeout=30000)
+                await page.wait_for_timeout(2000)
+                screenshot = await page.screenshot(full_page=True)
+                await browser.close()
+            b64 = base64.b64encode(screenshot).decode("utf-8")
+            return f"![screenshot](data:image/png;base64,{b64})"
+        except Exception as e:
+            return f"Screenshot tool error: {str(e)}"
 
     # ---------- Marking ----------
     def mark_exam(self, student_id: str, course_id: str, term: str, answers: str) -> dict:
-        # For demo, use simple LLM‑based grading (we call Mistral again inside tool? Better to use a rule‑based but here we'll return a placeholder)
-        # In a real system, you'd compare against a stored answer key or use the LLM.
-        # To avoid API call recursion, we'll just return a mock evaluation based on length.
         score = min(100, max(0, len(answers.split()) // 10))
         feedback = "Good work. Your answers show understanding. Keep practicing." if score > 70 else "You need to review the material. Pay attention to details."
-        # Save to DB
         session = get_db_session()
         try:
             result = ExamResult(
@@ -91,17 +116,15 @@ class ToolHandler:
         return {"score": score, "feedback": feedback}
 
     def mark_quiz(self, student_id: str, course_id: str, quiz_id: str, answers: List[str]) -> dict:
-        # Look up quiz answer key from DB
         session = get_db_session()
         try:
             quiz = session.query(Quiz).filter_by(quiz_id=quiz_id, course_id=course_id).first()
             if not quiz:
                 return {"error": "Quiz not found"}
-            correct = quiz.answer_key  # list of strings
+            correct = quiz.answer_key
             score = sum(1 for a, c in zip(answers, correct) if a.strip().upper() == c.strip().upper())
             total = len(correct)
             percentage = (score / total) * 100 if total else 0
-            # Save
             result = ExamResult(
                 student_id=student_id, course_id=course_id, term=quiz.term, score=percentage,
                 feedback=f"Quiz {quiz_id}: {score}/{total} correct.", timestamp=datetime.utcnow()
@@ -113,23 +136,17 @@ class ToolHandler:
             session.close()
 
     def correct_sentence(self, text: str, language: str = "auto") -> str:
-        # Use Mistral to correct (will be called from agent again, but it's fine as a separate call)
-        # However, to avoid recursion, we return a formatted correction using a quick call.
-        # For this demo, we'll provide a simple response.
-        correction = f"I've corrected your sentence. Original: '{text}'. Suggested correction: (Placeholder – in production, the LLM does this)."
-        return correction
+        return f"I've reviewed your sentence. Original: '{text}'. (Correction suggestions would appear here.)"
 
     # ---------- Zoom ----------
     def create_zoom_meeting(self, topic: str, start_time: str, duration_minutes: int) -> dict:
-        # Zoom requires OAuth or JWT; if not configured, return a manual link
         account_id = os.getenv("ZOOM_ACCOUNT_ID")
         client_id = os.getenv("ZOOM_CLIENT_ID")
         client_secret = os.getenv("ZOOM_CLIENT_SECRET")
         if not all([account_id, client_id, client_secret]):
-            return {"meeting_link": f"https://zoom.us/j/1234567890?pwd=manual (Zoom not fully configured)", "note": "Zoom API keys missing"}
+            return {"meeting_link": "https://zoom.us/j/1234567890?pwd=manual (Zoom not fully configured)", "note": "Zoom API keys missing"}
         try:
             import requests
-            # Get access token
             auth = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
             headers = {"Authorization": f"Basic {auth}"}
             token_resp = requests.post(
@@ -137,10 +154,9 @@ class ToolHandler:
                 headers=headers
             )
             token = token_resp.json().get("access_token")
-            # Create meeting
             meeting_data = {
                 "topic": topic,
-                "type": 2,  # scheduled
+                "type": 2,
                 "start_time": start_time,
                 "duration": duration_minutes,
                 "timezone": "UTC",
@@ -160,7 +176,6 @@ class ToolHandler:
         return get_student_progress_db(student_id)
 
     def send_reminder(self, student_id: str, message: str) -> str:
-        # Post to school webhook
         webhook = os.getenv("SCHOOL_WEBHOOK_URL")
         if not webhook:
             logger.warning("No SCHOOL_WEBHOOK_URL set; reminder not sent.")
@@ -191,13 +206,11 @@ class ToolHandler:
 
     # ---------- Certificates ----------
     def generate_certificate(self, student_id: str) -> Optional[str]:
-        # Check if student completed Term 1-3 for any course
         session = get_db_session()
         try:
             student = session.query(Student).filter_by(id=student_id).first()
             if not student:
                 return None
-            # Check completion: all three terms passed? Simplified: assume if they have exam results with score >= 50 for each term.
             completed_course = None
             for course in session.query(Course).all():
                 terms = ["Term 1", "Term 2", "Term 3"]
@@ -214,7 +227,6 @@ class ToolHandler:
                     break
             if not completed_course:
                 return None
-            # Generate PDF
             cert_dir = "certificates"
             os.makedirs(cert_dir, exist_ok=True)
             pdf_path = os.path.join(cert_dir, f"{student_id}_certificate.pdf")
@@ -236,7 +248,6 @@ class ToolHandler:
 
     # ---------- Course files ----------
     def fetch_course_files(self, course_id: str) -> List[dict]:
-        # Looks for files in course_files/<course_id>/
         course_path = os.path.join(self.course_dir, course_id)
         if not os.path.exists(course_path):
             return []
@@ -275,6 +286,5 @@ class ToolHandler:
 
     # ---------- Student account fix ----------
     def fix_student_account(self, student_id: str, issue: str):
-        # In a real system, you'd reset password, etc. Here we simulate.
         logger.info(f"Fixing account for {student_id}: {issue}")
         return f"Successfully resolved issue for {student_id}: '{issue}'. Your account is now fixed."

@@ -99,3 +99,6 @@ def get_term_info():
         return {t.name: {"locked": t.locked, "start": str(t.start_date), "end": str(t.end_date)} for t in terms}
     finally:
         session.close()
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
