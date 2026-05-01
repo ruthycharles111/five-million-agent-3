@@ -9,3 +9,4 @@ reportlab==4.2.2
 duckduckgo-search==5.2.0
 sqlalchemy==2.0.35
 aiosqlite==0.20.0
+a2wsgi
