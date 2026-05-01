@@ -25,10 +25,14 @@ async def lifespan(app: FastAPI):
     if agent:
         agent.close()
 
-# ----- WSGI wrapper for Gunicorn -----
-from a2wsgi import ASGIMiddleware
+# Create FastAPI instance
 app_fastapi = FastAPI(title="School Autonomous Agent API", lifespan=lifespan)
 
+# ---- WSGI wrapper so Gunicorn can run it ----
+from a2wsgi import ASGIMiddleware
+app = ASGIMiddleware(app_fastapi)   # <--- 'app' is the WSGI callable that Gunicorn expects
+
+# ---- Endpoints unchanged ----
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -109,6 +113,3 @@ async def admin_term_lock(action: str, term: str, secret: str = None):
 @app_fastapi.get("/health")
 def health():
     return {"status": "ok"}
-
-# WSGI application needed by Gunicorn
-application = ASGIMiddleware(app_fastapi)
