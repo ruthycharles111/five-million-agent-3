@@ -26,8 +26,14 @@ async def lifespan(app: FastAPI):
     if agent:
         agent.close()
 
+# FastAPI instance
 app_fastapi = FastAPI(title="School Autonomous Agent API", lifespan=lifespan)
 
+# WSGI wrapper for Gunicorn
+from a2wsgi import ASGIMiddleware
+app = ASGIMiddleware(app_fastapi)   # <-- This is what Gunicorn will call
+
+# Endpoints (unchanged)
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -64,7 +70,6 @@ async def chat_completions(request: ChatRequest):
 def health():
     return {"status": "ok"}
 
-# Additional endpoints unchanged (courses, certificates, etc.)
 @app_fastapi.get("/courses")
 async def list_courses():
     if not agent: raise HTTPException(status_code=503, detail="Agent not ready")
