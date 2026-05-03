@@ -3,6 +3,7 @@ from typing import Optional, List
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+from playwright.async_api import async_playwright
 from database import (
     get_db_session, Student, Course, Quiz, ExamResult, Term, UserAccount,
     get_student_progress_db, set_term_lock, get_term_info, init_db
@@ -67,15 +68,14 @@ class ToolHandler:
         try:
             if url.startswith('//'):
                 url = 'https:' + url
-            proc = await asyncio.create_subprocess_exec(
-                'wkhtmltoimage', '--format', 'png', '--quality', '94',
-                url, '-',
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                return f"Screenshot error: {stderr.decode()}"
-            b64 = base64.b64encode(stdout).decode()
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.goto(url, timeout=30000)
+                await page.wait_for_timeout(2000)
+                screenshot = await page.screenshot(full_page=True)
+                await browser.close()
+            b64 = base64.b64encode(screenshot).decode()
             return f"![screenshot](data:image/png;base64,{b64})"
         except Exception as e:
             return f"Screenshot tool error: {str(e)}"
