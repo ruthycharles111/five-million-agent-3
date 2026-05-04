@@ -1,6 +1,7 @@
 import os, json, logging
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI):
 
 # FastAPI instance
 app_fastapi = FastAPI(title="School Autonomous Agent API", lifespan=lifespan)
+app_fastapi.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # WSGI wrapper for Gunicorn
 from a2wsgi import ASGIMiddleware
