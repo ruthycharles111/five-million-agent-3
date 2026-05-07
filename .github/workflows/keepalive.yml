@@ -1,0 +1,22 @@
+name: Keep Render Agent Awake
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # every 5 minutes
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Health Check
+        run: |
+          for i in 1 2 3; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" https://five-million-agent-3.onrender.com/health)
+            if [ "$status" = "200" ]; then
+              echo "Health check OK"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Health check failed after 3 attempts"
+          exit 1
