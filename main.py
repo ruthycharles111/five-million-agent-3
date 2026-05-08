@@ -107,3 +107,4 @@ async def admin_term_lock(action: str, term: str, secret: str = None):
     elif action == "unlock": agent.tools.unlock_term(term)
     else: raise HTTPException(status_code=400, detail="Invalid action")
     return {"status": "ok"}
+# CORS fix
