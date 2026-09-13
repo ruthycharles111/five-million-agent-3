@@ -33,9 +33,8 @@ app_fastapi = FastAPI(title="School Autonomous Agent API", lifespan=lifespan)
 app_fastapi.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app_fastapi.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# WSGI wrapper for Gunicorn
-from a2wsgi import ASGIMiddleware
-app = ASGIMiddleware(app_fastapi)   # <-- This is what Gunicorn will call
+# Render starts this service with Uvicorn, so expose the native ASGI app.
+app = app_fastapi
 
 # Endpoints (unchanged)
 class ChatMessage(BaseModel):
@@ -51,7 +50,7 @@ class ChatResponse(BaseModel):
     id: str = "agent-001"
     object: str = "chat.completion"
     created: int = 0
-    model: str = "mistral-large-latest-agent"
+    model: str = os.getenv("MISTRAL_MODEL", "mistral-small-2603")
     choices: list
 
 @app_fastapi.post("/v1/chat/completions", response_model=ChatResponse)
@@ -64,7 +63,7 @@ async def chat_completions(request: ChatRequest):
     except Exception as e:
         logger.exception("Agent error")
         raise HTTPException(status_code=500, detail=str(e))
-    return ChatResponse(choices=[{
+    return ChatResponse(model=agent.model, choices=[{
         "index": 0,
         "message": {"role": "assistant", "content": result},
         "finish_reason": "stop"

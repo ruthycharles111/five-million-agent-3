@@ -7,6 +7,9 @@ from tools import ToolHandler
 
 logger = logging.getLogger("uvicorn")
 
+DEFAULT_MODEL = "mistral-small-2603"
+FALLBACK_MODELS = ("ministral-3b-2512", "mistral-large-2512")
+
 SYSTEM_PROMPT = """
 You are the autonomous agent for the school.
 You may use tools. For any request that needs a diagram:
@@ -19,35 +22,109 @@ Never apologise for failing to show an image if the tool succeeded.
 class AutonomousAgent:
     def __init__(self):
         self.tools = ToolHandler()
-        self.primary_key = os.getenv("MISTRAL_API_KEY")
-        self.backup_keys = [k.strip() for k in os.getenv("MISTRAL_BACKUP_KEYS","").split(",") if k.strip()]
-        self.all_keys = [self.primary_key] + [k for k in self.backup_keys if k != self.primary_key]
+        self.model = os.getenv("MISTRAL_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        self.models = tuple(dict.fromkeys((self.model, *FALLBACK_MODELS)))
+        self.primary_key = (os.getenv("MISTRAL_API_KEY") or "").strip()
+        self.backup_keys = [
+            key.strip()
+            for key in os.getenv("MISTRAL_BACKUP_KEYS", "").split(",")
+            if key.strip()
+        ]
+        # Keep the primary key first and remove duplicates without exposing values.
+        self.all_keys = list(dict.fromkeys(
+            key for key in (self.primary_key, *self.backup_keys) if key
+        ))
+        if not self.all_keys:
+            raise RuntimeError("No Mistral API keys configured. Set MISTRAL_API_KEY.")
         self.current_key_index = 0
-        self.client = Mistral(api_key=self.all_keys[self.current_key_index])
+        self.client = Mistral(api_key=self.all_keys[0])
+        logger.info(
+            "AAIRI agent ready. Model: %s. Keys loaded: %d.",
+            self.model,
+            len(self.all_keys),
+        )
 
-    def _rotate_key(self):
-        if self.current_key_index + 1 < len(self.all_keys):
-            self.current_key_index += 1
-            self.client = Mistral(api_key=self.all_keys[self.current_key_index])
-        else:
-            raise RuntimeError("All API keys exhausted")
+    @staticmethod
+    def _error_text(error):
+        parts = [str(error)]
+        for attribute in ("body", "detail", "message", "response"):
+            value = getattr(error, attribute, None)
+            if value is not None:
+                try:
+                    parts.append(json.dumps(value, default=str))
+                except Exception:
+                    parts.append(str(value))
+        return " ".join(parts)
+
+    @classmethod
+    def _classify_error(cls, error):
+        status = getattr(error, "status_code", None) or getattr(error, "status", None)
+        try:
+            status = int(status)
+        except (TypeError, ValueError):
+            status = 0
+        text = cls._error_text(error).lower()
+        if "invalid_api_key" in text or "unauthorized" in text or status in (401, 403):
+            return "invalid_api_key"
+        if "rate_limit" in text or "429" in text or status == 429:
+            return "rate_limit"
+        if "model_not_found" in text or status == 404:
+            return "model_not_found"
+        if "insufficient_quota" in text:
+            return "insufficient_quota"
+        if status >= 500:
+            return "server_error"
+        return "unknown"
+
+    @staticmethod
+    def _diagnostic_message(kind, model):
+        if kind == "invalid_api_key":
+            return "Mistral API key invalid. Admin: rotate MISTRAL_API_KEY on Render."
+        if kind == "rate_limit":
+            return f"Rate limit hit on model {model}. Retrying on fallback model."
+        if kind == "model_not_found":
+            return f"Model {model} no longer exists. Check MISTRAL_MODEL env var."
+        if kind == "insufficient_quota":
+            return "Mistral account quota exceeded. Top up at console.mistral.ai/billing."
+        if kind == "server_error":
+            return f"Mistral server error on model {model}. Retrying on fallback model."
+        return f"Mistral request failed on model {model}."
 
     def _call_mistral(self, messages, temperature, max_tokens):
-        for _ in range(len(self.all_keys)):
-            try:
-                return self.client.chat.complete(
-                    model="mistral-large-latest",
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    tools=self._tool_definitions(),
-                    tool_choice="auto"
-                )
-            except Exception as e:
-                if any(x in str(e) for x in ("401","403","429")):
-                    self._rotate_key()
-                else:
-                    raise
+        attempts = 0
+        diagnostics = []
+        for key_index, key in enumerate(self.all_keys):
+            client = Mistral(api_key=key)
+            for model in self.models:
+                attempts += 1
+                try:
+                    response = client.chat.complete(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        tools=self._tool_definitions(),
+                        tool_choice="auto",
+                    )
+                    self.current_key_index = key_index
+                    self.client = client
+                    return response
+                except Exception as error:
+                    kind = self._classify_error(error)
+                    diagnostic = self._diagnostic_message(kind, model)
+                    diagnostics.append(diagnostic)
+                    logger.warning("%s", diagnostic)
+                    if kind == "invalid_api_key":
+                        break
+                    if kind == "unknown":
+                        raise
+
+        logger.error(
+            "All Mistral attempts failed after %d attempts. Diagnostics: %s",
+            attempts,
+            " | ".join(dict.fromkeys(diagnostics)),
+        )
+        raise RuntimeError("All API keys exhausted.")
 
     def _tool_definitions(self):
         return [
